@@ -1,0 +1,173 @@
+#include <BluetoothSerial.h>
+#include <OneWire.h>
+
+// Configuración de sensores y dispositivos
+#define ONE_WIRE_BUS 4         // Sensor DS18B20 en el pin 4
+#define PIN_FOCO 22            // Foco en el pin 22
+#define PIN_VENTILADOR 23      // Ventilador en el pin 23
+#define PIN_SENSOR_GAS 34      // Sensor de gas en el pin 34
+#define UMBRAL_METANO 900      // Umbral de detección de gas metano
+
+// Límites de temperatura configurables
+float TEMP_MIN = 34.0;
+float TEMP_MAX = 36.0;
+
+// Configuración para el ciclo del foco
+const unsigned long TIEMPO_ENCENDIDO = 5000;    // 5 segundos encendido
+const unsigned long TIEMPO_APAGADO = 30000;     // 30 segundos apagado
+
+BluetoothSerial SerialBT;  // Comunicación Bluetooth
+OneWire ds(ONE_WIRE_BUS);  
+
+// Variables globales
+float temperatureSum = 0;
+int readingsCount = 0;
+bool ventiladorActivo = false;
+bool temperaturaEsBaja = false;
+unsigned long ultimoCambioFoco = 0;
+bool focoEncendido = false;
+
+// Prototipos de funciones
+float readTemperature();
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Inicialización del Bluetooth
+  if (!SerialBT.begin("ESP32_Bluetooth")) {
+    Serial.println("Error al iniciar Bluetooth");
+  } else {
+    Serial.println("Bluetooth iniciado correctamente");
+  }
+
+  // Configuración de pines
+  pinMode(PIN_FOCO, OUTPUT);
+  pinMode(PIN_VENTILADOR, OUTPUT);
+  pinMode(PIN_SENSOR_GAS, INPUT);
+
+  // Inicializar ventilador y foco apagados
+  digitalWrite(PIN_VENTILADOR, LOW);
+  digitalWrite(PIN_FOCO, LOW);
+}
+
+void loop() {
+  static unsigned long lastUpdate = 0;
+  static unsigned long lastSend = 0;
+  unsigned long currentMillis = millis();
+
+  // Leer temperatura cada 1 segundo
+  if (currentMillis - lastUpdate > 1000) {
+    lastUpdate = currentMillis;
+    float currentTemp = readTemperature();
+
+    if (!isnan(currentTemp)) {
+      temperatureSum += currentTemp;
+      readingsCount++;
+    }
+  }
+
+  // Enviar datos y controlar dispositivos cada 10 segundos
+  if (currentMillis - lastSend > 10000 && readingsCount > 0) {
+    lastSend = currentMillis;
+    float avgTemp = temperatureSum / readingsCount;
+    temperatureSum = 0;
+    readingsCount = 0;
+
+    // Leer sensor de gas
+    int gasValue = analogRead(PIN_SENSOR_GAS);
+
+    // Control de temperatura - Solo actualizamos la bandera
+    if (avgTemp < TEMP_MIN) {
+      temperaturaEsBaja = true;
+      digitalWrite(PIN_VENTILADOR, LOW);
+      ventiladorActivo = false;
+    } else if (avgTemp > TEMP_MAX) {
+      temperaturaEsBaja = false;
+      digitalWrite(PIN_FOCO, LOW);
+      digitalWrite(PIN_VENTILADOR, HIGH);
+      ventiladorActivo = true;
+    } else {
+      temperaturaEsBaja = false;
+      digitalWrite(PIN_FOCO, LOW);
+      digitalWrite(PIN_VENTILADOR, LOW);
+      ventiladorActivo = false;
+    }
+
+    // **Detección de gas metano**
+    bool gasDetectado = gasValue > UMBRAL_METANO;
+
+    // Enviar datos por Bluetooth
+    String mensaje = "";
+    mensaje += "Temperatura Promedio: " + String(avgTemp, 2) + " °C\n";
+    mensaje += "Foco: " + String(digitalRead(PIN_FOCO) ? "Encendido" : "Apagado") + "\n";
+    mensaje += "Ventilador: " + String(digitalRead(PIN_VENTILADOR) ? "Encendido" : "Apagado") + "\n";
+    mensaje += "Gas Metano: " + String(gasValue) + " (" + (gasDetectado ? "ALERTA" : "Normal") + ")\n";
+    mensaje += "-------------------------\n";
+
+    SerialBT.print(mensaje);
+    Serial.print(mensaje);  // También enviar al monitor serie
+  }
+
+  // Control cíclico del foco cuando la temperatura es baja
+  if (temperaturaEsBaja) {
+    unsigned long tiempoTranscurrido = currentMillis - ultimoCambioFoco;
+    
+    if (focoEncendido && tiempoTranscurrido >= TIEMPO_ENCENDIDO) {
+      // Tiempo de apagar el foco
+      digitalWrite(PIN_FOCO, LOW);
+      focoEncendido = false;
+      ultimoCambioFoco = currentMillis;
+    }
+    else if (!focoEncendido && tiempoTranscurrido >= TIEMPO_APAGADO) {
+      // Tiempo de encender el foco
+      digitalWrite(PIN_FOCO, HIGH);
+      focoEncendido = true;
+      ultimoCambioFoco = currentMillis;
+    }
+  } else if (focoEncendido) {
+    // Si la temperatura ya no es baja pero el foco está encendido, lo apagamos
+    digitalWrite(PIN_FOCO, LOW);
+    focoEncendido = false;
+  }
+}
+
+// **Función para leer temperatura del sensor DS18B20**
+float readTemperature() {
+  byte data[9];
+  byte addr[8];
+
+  if (!ds.search(addr)) {
+    ds.reset_search();
+    delay(250);
+    return NAN;
+  }
+
+  if (OneWire::crc8(addr, 7) != addr[7]) {
+    return NAN;
+  }
+
+  ds.reset();
+  ds.select(addr);
+  ds.write(0x44, 1);
+  delay(750);
+
+  ds.reset();
+  ds.select(addr);
+  ds.write(0xBE);
+  for (byte i = 0; i < 9; i++) {
+    data[i] = ds.read();
+  }
+
+  int16_t raw = (data[1] << 8) | data[0];
+  byte cfg = data[4] & 0x60;
+
+  if (cfg == 0x00)
+    raw = raw & ~7;
+  else if (cfg == 0x20)
+    raw = raw & ~3;
+  else if (cfg == 0x40)
+    raw = raw & ~1;
+
+  return ((float)raw) / 16.0;
+}
+
