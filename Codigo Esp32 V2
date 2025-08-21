@@ -1,0 +1,170 @@
+#include <BluetoothSerial.h>
+#include <OneWire.h>
+#include <DallasTemperature.h> // Biblioteca más eficiente para DS18B20
+
+// Configuración de sensores y dispositivos
+#define ONE_WIRE_BUS 4
+#define PIN_FOCO 22
+#define PIN_VENTILADOR 23
+#define PIN_SENSOR_GAS 34  // Pin analógico A0 del sensor MQ-2
+
+// Límites de temperatura configurables
+const float TEMP_MIN = 34.0;
+const float TEMP_MAX = 36.0;
+
+// Umbral de gas peligroso en PPM (ajustar según necesidades)
+const int GAS_THRESHOLD_PPM = 1000;
+
+// Constantes para tiempos (ms)
+const unsigned long TIEMPO_LECTURA = 1000;     // 1 segundo
+const unsigned long TIEMPO_RESTART = 300000;   // 5 minutos (como en el original)
+
+// Calibración del sensor MQ-2
+const float MQ2_RL = 10.0;       // Resistencia de carga en kOhms
+const float MQ2_R0 = 10.0;       // Valor R0 en aire limpio (debes calibrar esto)
+const float MQ2_CURVE_A = 574.25;// Coeficientes de la curva para LPG
+const float MQ2_CURVE_B = -2.222;// (pueden variar según tu sensor)
+
+BluetoothSerial SerialBT;
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Variables globales (optimizadas)
+float temperatura = 0.0;
+bool ventiladorActivo = false;
+bool focoActivo = false;
+bool gasDetectado = false;
+int nivelGasPPM = 0;            // Nivel de gas en PPM
+char mensaje[256];              // Buffer para mensajes
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Inicialización del Bluetooth con comprobación
+  SerialBT.begin("ESP32_Control");
+  
+  // Configuración de pines
+  pinMode(PIN_FOCO, OUTPUT);
+  pinMode(PIN_VENTILADOR, OUTPUT);
+  // El pin analógico no necesita configuración
+  
+  // Inicializar dispositivos apagados
+  digitalWrite(PIN_FOCO, LOW);
+  digitalWrite(PIN_VENTILADOR, LOW);
+  
+  // Inicializar sensor de temperatura
+  sensors.begin();
+  sensors.setResolution(12); // Resolución 12-bit (0.0625°C) - máxima precisión
+}
+
+void loop() {
+  static unsigned long ultimaLectura = 0;
+  static unsigned long ultimoReset = 0;
+  unsigned long ahora = millis();
+  
+  // Prevenir desbordamiento de millis()
+  if (ahora < ultimaLectura) {
+    ultimaLectura = ahora;
+    ultimoReset = ahora;
+  }
+  
+  // Reinicio automático cada 5 minutos (como solicitado)
+  if (ahora - ultimoReset >= TIEMPO_RESTART) {
+    ultimoReset = ahora;
+    ESP.restart();
+  }
+  
+  // Ejecutar lógica principal cada TIEMPO_LECTURA (1 segundo)
+  if (ahora - ultimaLectura >= TIEMPO_LECTURA) {
+    ultimaLectura = ahora;
+    
+    // Leer temperatura (método optimizado)
+    leerTemperatura();
+    
+    // Leer sensor de gas y calcular PPM
+    leerGas();
+    
+    // Controlar dispositivos
+    controlarDispositivos(ahora);
+    
+    // Enviar datos
+    enviarDatos();
+  }
+  
+  // Pequeña pausa para CPU
+  delay(10);
+}
+
+void leerTemperatura() {
+  sensors.requestTemperatures(); // Solicitar lectura (no bloqueante)
+  float temp = sensors.getTempCByIndex(0);
+  
+  // Filtrar lecturas inválidas
+  if (temp > -50 && temp < 100) {
+    temperatura = temp;
+  }
+}
+
+void leerGas() {
+  // Leer valor analógico (ESP32 tiene ADC de 12 bits, 0-4095)
+  int adc_value = analogRead(PIN_SENSOR_GAS);
+  
+  // Convertir a voltaje (ESP32 ADC a 3.3V referencia)
+  float voltage = adc_value * (3.3 / 4095.0);
+  
+  // Calcular Rs (resistencia del sensor en presencia de gas)
+  float rs = ((3.3 * MQ2_RL) / voltage) - MQ2_RL;
+  
+  // Calcular ratio Rs/R0
+  float ratio = rs / MQ2_R0;
+  
+  // Calcular PPM usando la fórmula: ppm = A * (Rs/R0)^B
+  nivelGasPPM = MQ2_CURVE_A * pow(ratio, MQ2_CURVE_B);
+  
+  // Determinar si hay detección de gas según umbral
+  gasDetectado = (nivelGasPPM > GAS_THRESHOLD_PPM);
+}
+
+void controlarDispositivos(unsigned long ahora) {
+  // Control de temperatura
+  if (temperatura < TEMP_MIN) {
+    // Encender foco sin ciclo de tiempo
+    digitalWrite(PIN_FOCO, HIGH);
+    focoActivo = true;
+    
+    // Apagar ventilador
+    digitalWrite(PIN_VENTILADOR, LOW);
+    ventiladorActivo = false;
+  } 
+  else if (temperatura > TEMP_MAX) {
+    // Apagar foco
+    digitalWrite(PIN_FOCO, LOW);
+    focoActivo = false;
+    
+    // Encender ventilador
+    digitalWrite(PIN_VENTILADOR, HIGH);
+    ventiladorActivo = true;
+  } 
+  else {
+    // Temperatura en rango óptimo, apagar ambos
+    digitalWrite(PIN_FOCO, LOW);
+    digitalWrite(PIN_VENTILADOR, LOW);
+    focoActivo = false;
+    ventiladorActivo = false;
+  }
+}
+
+void enviarDatos() {
+  // Enviar datos por Bluetooth utilizando un búfer fijo para evitar fragmentación
+  snprintf(mensaje, sizeof(mensaje),
+           "Temperatura Promedio: %.2f °C\nFoco: %s\nVentilador: %s\nGas Metano: %d PPM (%s)\n-------------------------\n",
+           temperatura,
+           focoActivo ? "Encendido" : "Apagado",
+           ventiladorActivo ? "Encendido" : "Apagado",
+           nivelGasPPM,
+           gasDetectado ? "ALERTA" : "Normal");
+  
+  SerialBT.print(mensaje);
+  Serial.print(mensaje);  // También enviar al monitor serie
+}
+
