@@ -1,0 +1,54 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// Pin del sensor DS18B20
+#define ONE_WIRE_BUS 2
+
+// Pines de los relevadores
+#define RELAY_FOCO 8        // Relevador para el foco (calor)
+#define RELAY_VENTILADOR 9  // Relevador para el ventilador (frío)
+
+// Rango de temperatura deseado (en grados Celsius)
+#define TEMP_MIN 20.0
+#define TEMP_MAX 28.0
+
+// Configuración del bus OneWire y sensor de temperatura
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+void setup() {
+  Serial.begin(9600);
+  sensors.begin();
+
+  // Configuración de pines como salida
+  pinMode(RELAY_FOCO, OUTPUT);
+  pinMode(RELAY_VENTILADOR, OUTPUT);
+
+  // Inicialmente ambos apagados
+  digitalWrite(RELAY_FOCO, LOW);
+  digitalWrite(RELAY_VENTILADOR, LOW);
+}
+
+void loop() {
+  sensors.requestTemperatures(); // Solicita lectura
+  float tempC = sensors.getTempCByIndex(0);
+
+  Serial.print("Temperatura actual: ");
+  Serial.print(tempC);
+  Serial.println(" °C");
+
+  // Control del foco y ventilador según temperatura
+  if (tempC < TEMP_MIN) {
+    digitalWrite(RELAY_FOCO, HIGH);         // Enciende el foco
+    digitalWrite(RELAY_VENTILADOR, LOW);    // Apaga el ventilador
+  } else if (tempC > TEMP_MAX) {
+    digitalWrite(RELAY_FOCO, LOW);          // Apaga el foco
+    digitalWrite(RELAY_VENTILADOR, HIGH);   // Enciende el ventilador
+  } else {
+    digitalWrite(RELAY_FOCO, LOW);          // Ambos apagados en rango estable
+    digitalWrite(RELAY_VENTILADOR, LOW);
+  }
+
+  delay(1000); // Espera 1 segundo entre lecturas
+}
+
